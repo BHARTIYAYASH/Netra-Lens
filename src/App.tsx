@@ -8,6 +8,13 @@ const LANG_MAP: Record<string, string> = {
   'tam_Taml': 'ta'
 };
 
+const TESSERACT_LANG_MAP: Record<string, string> = {
+  'eng_Latn': 'eng',
+  'hin_Deva': 'hin',
+  'mar_Deva': 'mar',
+  'tam_Taml': 'tam'
+};
+
 function App() {
   const [isActive, setIsActive] = useState(false);
   const [useOnline, setUseOnline] = useState(true);
@@ -80,18 +87,40 @@ function App() {
     }
   };
 
+  const processImage = async (imageUrl: string) => {
+    setIsProcessing(true);
+    setResult('Processing OCR...');
+
+    const lang = TESSERACT_LANG_MAP[sourceLang] || 'eng';
+
+    // Send to background -> offscreen for OCR
+    chrome.runtime.sendMessage({
+      action: 'OCR',
+      imageUrl: imageUrl,
+      lang: lang
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        setResult('Error: ' + chrome.runtime.lastError.message);
+        setIsProcessing(false);
+        return;
+      }
+      if (response?.success) {
+        setResult('OCR request sent. Processing...');
+      }
+    });
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsProcessing(true);
-    setResult('Processing image...');
+    setResult('Reading image...');
 
     const reader = new FileReader();
     reader.onload = async () => {
-      // TODO: Send to background for OCR processing
-      setResult('OCR processing will be implemented here');
-      setIsProcessing(false);
+      const imageUrl = reader.result as string;
+      await processImage(imageUrl);
     };
     reader.readAsDataURL(file);
   };
@@ -162,14 +191,50 @@ function App() {
     setResult('Requesting screen capture...');
 
     try {
-      // Request screen capture
-      chrome.runtime.sendMessage({ action: 'CAPTURE_SCREEN' }, (response) => {
-        if (response?.success) {
-          setResult('Screen captured! Processing...');
+      chrome.runtime.sendMessage({ action: 'CAPTURE_SCREEN' }, async (response) => {
+        if (response?.success && response.streamId) {
+          setResult('Screen captured! Processing frame...');
+
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: response.streamId,
+                }
+              } as any
+            });
+
+            // Creates a video element to play the stream
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            await video.play();
+
+            // Create canvas to draw frame
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const imageUrl = canvas.toDataURL('image/png');
+
+            // Stop all tracks
+            stream.getTracks().forEach(track => track.stop());
+
+            // Process the captured image
+            await processImage(imageUrl);
+
+          } catch (err) {
+            console.error(err);
+            setResult('Error capturing stream: ' + (err as Error).message);
+            setIsProcessing(false);
+          }
         } else {
-          setResult('Screen capture failed');
+          setResult('Screen capture failed or denied.');
+          setIsProcessing(false);
         }
-        setIsProcessing(false);
       });
     } catch (error) {
       setResult('Error: ' + (error as Error).message);

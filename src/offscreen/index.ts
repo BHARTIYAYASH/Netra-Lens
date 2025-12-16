@@ -23,11 +23,29 @@ async function loadTranslationModel() {
 }
 
 // OCR function
+// Worker cache to reuse workers and support offline better (re-initialization needs network if not cached)
+const workerCache: Record<string, Tesseract.Worker> = {};
+
 async function performOCR(imageUrl: string, lang: string) {
     console.log(`Performing OCR for ${lang}...`);
-    const worker = await Tesseract.createWorker(lang);
+
+    // access global Tesseract
+    if (!workerCache[lang]) {
+        console.log(`Creating new worker for ${lang}...`);
+        try {
+            const worker = await Tesseract.createWorker(lang);
+            workerCache[lang] = worker;
+        } catch (err) {
+            if (!navigator.onLine) {
+                throw new Error(`Offline: Cannot download ${lang} language data. Please connect to internet for the first run.`);
+            }
+            throw err;
+        }
+    }
+
+    const worker = workerCache[lang];
     const ret = await worker.recognize(imageUrl);
-    await worker.terminate();
+    // Do not terminate worker to allow reuse
     return ret.data.text;
 }
 
