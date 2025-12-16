@@ -1,8 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
-import { Power, History, Languages, ScanEye, Upload, Type, Monitor } from 'lucide-react';
+import { Power, History, Languages, ScanEye, Upload, Type, Monitor, Globe } from 'lucide-react';
+
+const LANG_MAP: Record<string, string> = {
+  'eng_Latn': 'en',
+  'hin_Deva': 'hi',
+  'mar_Deva': 'mr',
+  'tam_Taml': 'ta'
+};
 
 function App() {
   const [isActive, setIsActive] = useState(false);
+  const [useOnline, setUseOnline] = useState(true);
   const [sourceLang, setSourceLang] = useState('eng_Latn');
   const [targetLang, setTargetLang] = useState('hin_Deva');
   const [history, setHistory] = useState<string[]>([]);
@@ -13,13 +21,40 @@ function App() {
 
   useEffect(() => {
     // Load state from storage
-    chrome.storage.local.get(['isActive', 'sourceLang', 'targetLang', 'history'], (result) => {
+    chrome.storage.local.get(['isActive', 'useOnline', 'sourceLang', 'targetLang', 'history'], (result) => {
       if (result.isActive !== undefined) setIsActive(Boolean(result.isActive));
+      if (result.useOnline !== undefined) setUseOnline(Boolean(result.useOnline));
       if (result.sourceLang) setSourceLang(String(result.sourceLang));
       if (result.targetLang) setTargetLang(String(result.targetLang));
       if (result.history) setHistory(result.history as string[]);
     });
-  }, []);
+
+    // Listen for translation results
+    const messageListener = (message: any) => {
+      if (message.action === 'TRANSLATION_RESULT') {
+        setIsProcessing(false);
+        const translatedText = message.data?.[0]?.translation_text || JSON.stringify(message.data);
+        setResult(translatedText);
+
+        // Add to history
+        const newHistory = [`${message.original} → ${translatedText}`, ...history].slice(0, 10);
+        setHistory(newHistory);
+        chrome.storage.local.set({ history: newHistory });
+      } else if (message.action === 'OCR_RESULT') {
+        setIsProcessing(false);
+        setResult('OCR Result: ' + message.text);
+      } else if (message.action === 'TRANSLATION_ERROR' || message.action === 'OCR_ERROR') {
+        setIsProcessing(false);
+        setResult('Error: ' + message.error);
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(messageListener);
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(messageListener);
+    };
+  }, [history]);
 
   const toggleActive = () => {
     const newState = !isActive;
@@ -27,6 +62,12 @@ function App() {
     chrome.storage.local.set({ isActive: newState });
     // Notify background/content
     chrome.runtime.sendMessage({ action: 'TOGGLE_ACTIVE', value: newState });
+  };
+
+  const toggleOnline = () => {
+    const newState = !useOnline;
+    setUseOnline(newState);
+    chrome.storage.local.set({ useOnline: newState });
   };
 
   const handleLangChange = (type: 'source' | 'target', value: string) => {
@@ -61,16 +102,59 @@ function App() {
     setIsProcessing(true);
     setResult('Translating...');
 
-    // TODO: Send to background for translation
-    setTimeout(() => {
-      setResult('Translation will be implemented here');
-      setIsProcessing(false);
+    // Online Mode
+    if (useOnline) {
+      try {
+        const source = LANG_MAP[sourceLang];
+        const target = LANG_MAP[targetLang];
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(inputText)}`;
 
-      // Add to history
-      const newHistory = [`${inputText} → [Translation]`, ...history].slice(0, 10);
-      setHistory(newHistory);
-      chrome.storage.local.set({ history: newHistory });
-    }, 1000);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Network response was not ok');
+        const data = await res.json();
+        // data[0] is array of sentences, each [translated, original, ...]
+        const translatedText = data[0].map((x: any) => x[0]).join('');
+
+        setResult(translatedText);
+        setIsProcessing(false);
+
+        // Add to history
+        const newHistory = [`${inputText} → ${translatedText}`, ...history].slice(0, 10);
+        setHistory(newHistory);
+        chrome.storage.local.set({ history: newHistory });
+        return; // Success, don't use local
+      } catch (e) {
+        console.error("Online translation failed", e);
+        setResult("Online translation failed, trying local model...");
+        // Continue to local fallback
+      }
+    }
+
+    try {
+      // Send translation request to background script
+      chrome.runtime.sendMessage({
+        action: 'TRANSLATE',
+        text: inputText,
+        sourceLang: sourceLang,
+        targetLang: targetLang
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          setResult('Error: ' + chrome.runtime.lastError.message);
+          setIsProcessing(false);
+          return;
+        }
+
+        if (response?.success) {
+          setResult('Local translation request sent. Processing...');
+        } else {
+          setResult('Failed to send translation request');
+          setIsProcessing(false);
+        }
+      });
+    } catch (error) {
+      setResult('Error: ' + (error as Error).message);
+      setIsProcessing(false);
+    }
   };
 
   const handleScreenCapture = async () => {
@@ -119,9 +203,20 @@ function App() {
 
       {/* Language Selection */}
       <div className="mb-4 space-y-2">
-        <div className="flex items-center gap-2 font-bold text-sm">
-          <Languages className="w-4 h-4" />
-          <span>Translation</span>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 font-bold text-sm">
+            <Languages className="w-4 h-4" />
+            <span>Translation</span>
+          </div>
+
+          {/* Online Toggle */}
+          <button
+            onClick={toggleOnline}
+            className={`flex items-center gap-1 text-xs border border-flexoki-text px-2 py-0.5 rounded-full ${useOnline ? 'bg-flexoki-success text-white' : 'bg-gray-200 text-gray-500'}`}
+          >
+            <Globe className="w-3 h-3" />
+            <span>{useOnline ? 'Online' : 'Offline'}</span>
+          </button>
         </div>
         <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center">
           <select

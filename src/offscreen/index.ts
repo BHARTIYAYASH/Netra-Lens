@@ -35,30 +35,42 @@ chrome.runtime.onMessage.addListener((message: any, _sender: chrome.runtime.Mess
     if (message.action === 'TRANSLATE') {
         (async () => {
             try {
+                console.log('Translation requested:', message);
                 const model = await loadTranslationModel();
                 const output = await model(message.text, {
                     src_lang: message.sourceLang, // e.g., 'eng_Latn'
                     tgt_lang: message.targetLang, // e.g., 'hin_Deva'
                 });
+                console.log('Translation result:', output);
                 chrome.runtime.sendMessage({
                     action: 'TRANSLATION_RESULT',
                     data: output,
                     original: message.text
                 });
             } catch (err) {
-                console.error(err);
+                console.error('Translation error:', err);
+                chrome.runtime.sendMessage({
+                    action: 'TRANSLATION_ERROR',
+                    error: err instanceof Error ? err.message : 'Translation failed'
+                });
             }
         })();
     } else if (message.action === 'OCR') {
         (async () => {
             try {
+                console.log('OCR requested:', message);
                 const text = await performOCR(message.imageUrl, message.lang);
+                console.log('OCR result:', text);
                 chrome.runtime.sendMessage({
                     action: 'OCR_RESULT',
                     text: text
                 });
             } catch (err) {
-                console.error(err);
+                console.error('OCR error:', err);
+                chrome.runtime.sendMessage({
+                    action: 'OCR_ERROR',
+                    error: err instanceof Error ? err.message : 'OCR failed'
+                });
             }
         })();
     }
